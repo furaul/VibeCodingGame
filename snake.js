@@ -1,6 +1,37 @@
 #!/usr/bin/env node
 'use strict';
 
+// ── History helpers ─────────────────────────────────────────────────
+const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const HISTORY_FILE = path.join(os.homedir(), '.vibe-snake-history.json');
+const USERNAME = os.userInfo().username;
+
+function loadHistory() {
+  try {
+    return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(records) {
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(records, null, 2));
+}
+
+function addRecord(score) {
+  const records = loadHistory();
+  records.push({ username: USERNAME, score, time: new Date().toISOString() });
+  saveHistory(records);
+}
+
+function getHighScore() {
+  const records = loadHistory();
+  if (records.length === 0) return 0;
+  return Math.max(...records.map(r => r.score));
+}
+
 // ── Terminal helpers ────────────────────────────────────────────────
 const stdout = process.stdout;
 const stdin = process.stdin;
@@ -69,7 +100,10 @@ let offsetY = 1; // top margin in terminal rows
 let snake, direction, nextDirection, food, score, gameOver, paused;
 let tickTimer = null;
 let countdownTimer = null;
-let state = 'menu'; // menu | playing | paused | gameover | countdown
+let highScore = 0; // loaded from history at game start
+let milestoneShown = ''; // tracks which encouragement has been shown: '', 'close', 'tied', 'beat'
+let milestoneTimer = null; // timer for clearing milestone toast
+let state = 'menu'; // menu | playing | paused | gameover | countdown | history
 let pausedByFocus = false; // true when auto-paused by losing tmux focus
 
 function fitGrid() {
@@ -84,6 +118,9 @@ function fitGrid() {
 
 function initGame() {
   fitGrid();
+  highScore = getHighScore();
+  milestoneShown = '';
+  if (milestoneTimer) { clearTimeout(milestoneTimer); milestoneTimer = null; }
   const cx = Math.floor(gridW / 2);
   const cy = Math.floor(gridH / 2);
   snake = [
@@ -140,6 +177,7 @@ function tick() {
     gameOver = true;
     state = 'gameover';
     stopTick();
+    addRecord(score);
     drawGameOver();
     return;
   }
@@ -150,6 +188,7 @@ function tick() {
       gameOver = true;
       state = 'gameover';
       stopTick();
+      addRecord(score);
       drawGameOver();
       return;
     }
@@ -159,6 +198,7 @@ function tick() {
 
   if (nh.x === food.x && nh.y === food.y) {
     score++;
+    checkMilestone();
     spawnFood();
     // Draw new food immediately
     drawCell(food.x, food.y, COLOR.red + COLOR.bold + CHARS.food + COLOR.reset);
@@ -201,6 +241,43 @@ function stopTick() {
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────
+function checkMilestone() {
+  if (highScore === 0) return; // no history yet, nothing to compare
+  if (milestoneShown === 'beat' && score > highScore) return; // already celebrated
+
+  if (score > highScore && milestoneShown !== 'beat') {
+    milestoneShown = 'beat';
+    showToast('NEW RECORD! You are #1!', COLOR.yellow);
+  } else if (score === highScore && milestoneShown !== 'tied' && milestoneShown !== 'beat') {
+    milestoneShown = 'tied';
+    showToast('TIED! One more to beat the record!', COLOR.cyan);
+  } else if (highScore - score <= 2 && highScore - score > 0 && milestoneShown === '') {
+    milestoneShown = 'close';
+    showToast(`Almost there! ${highScore - score} to go!`, COLOR.brightGreen);
+  }
+}
+
+function showToast(msg, color) {
+  if (milestoneTimer) { clearTimeout(milestoneTimer); milestoneTimer = null; }
+  drawToast(msg, color);
+  milestoneTimer = setTimeout(() => {
+    milestoneTimer = null;
+    clearToast();
+  }, 2000);
+}
+
+function drawToast(msg, color) {
+  const cx = offsetX + gridW;
+  const y = offsetY + gridH + 3;
+  const padded = '  ' + msg + '  ';
+  write(moveTo(cx - Math.floor(padded.length / 2), y) + color + COLOR.bold + padded + COLOR.reset);
+}
+
+function clearToast() {
+  const y = offsetY + gridH + 3;
+  write(moveTo(0, y) + ' '.repeat(stdout.columns || 80));
+}
+
 function drawCell(gx, gy, content) {
   // Each grid cell is 2 chars wide; left char is content, right is space
   const tx = offsetX + 1 + gx * 2;
@@ -227,6 +304,19 @@ function drawBorder() {
 function drawScore() {
   const text = ` Score: ${score} `;
   write(moveTo(offsetX + 2, offsetY) + COLOR.yellow + COLOR.bold + text + COLOR.reset + COLOR.dim + CHARS.borderH + COLOR.reset);
+
+  // High score display on the right side of the border
+  if (highScore > 0) {
+    let hsText;
+    if (score > highScore) {
+      hsText = COLOR.yellow + COLOR.bold + ` NEW BEST: ${score} ` + COLOR.reset;
+    } else {
+      const diff = highScore - score;
+      hsText = COLOR.dim + ` Best: ${highScore}  (-${diff}) ` + COLOR.reset;
+    }
+    const hsPosX = offsetX + gridW * 2 - 14;
+    write(moveTo(hsPosX, offsetY) + hsText + COLOR.dim + CHARS.borderH + COLOR.reset);
+  }
 }
 
 function drawControls() {
@@ -307,9 +397,10 @@ function drawPauseMenu() {
 function drawGameOver() {
   const cx = offsetX + gridW;
   const cy = offsetY + Math.floor(gridH / 2);
+  const isNewRecord = highScore > 0 && score > highScore;
   const scoreLine = `Score: ${score}`;
-  const innerW = Math.max(20, scoreLine.length + 4);
-  const totalW = innerW + 2; // +2 for │ on each side
+  const innerW = Math.max(22, scoreLine.length + 4);
+  const totalW = innerW + 2;
   const halfW = Math.floor(totalW / 2);
 
   function padCenter(text, width) {
@@ -320,18 +411,37 @@ function drawGameOver() {
 
   const border = '─'.repeat(innerW);
   const empty = ' '.repeat(innerW);
-  const box = [
-    '┌' + border + '┐',
-    '│' + padCenter('💀 GAME OVER', innerW) + '│',
-    '│' + empty + '│',
-    '│' + padCenter(scoreLine, innerW) + '│',
-    '│' + empty + '│',
-    '│' + padCenter('[R] Restart', innerW) + '│',
-    '│' + padCenter('[Q] Quit', innerW) + '│',
-    '└' + border + '┘',
-  ];
-  for (let i = 0; i < box.length; i++) {
-    write(moveTo(cx - halfW, cy - 4 + i) + COLOR.red + COLOR.bold + box[i] + COLOR.reset);
+  const lines = [];
+  if (isNewRecord) {
+    lines.push('┌' + border + '┐');
+    lines.push('│' + padCenter('NEW RECORD!', innerW) + '│');
+    lines.push('│' + padCenter('Prev best: ' + highScore, innerW) + '│');
+    lines.push('│' + empty + '│');
+    lines.push('│' + padCenter(scoreLine, innerW) + '│');
+    lines.push('│' + empty + '│');
+    lines.push('│' + padCenter('[R] Restart', innerW) + '│');
+    lines.push('│' + padCenter('[H] History', innerW) + '│');
+    lines.push('│' + padCenter('[Q] Quit', innerW) + '│');
+    lines.push('└' + border + '┘');
+  } else {
+    lines.push('┌' + border + '┐');
+    lines.push('│' + padCenter('GAME OVER', innerW) + '│');
+    lines.push('│' + empty + '│');
+    lines.push('│' + padCenter(scoreLine, innerW) + '│');
+    if (highScore > 0) {
+      lines.push('│' + padCenter('Best: ' + highScore, innerW) + '│');
+    }
+    lines.push('│' + empty + '│');
+    lines.push('│' + padCenter('[R] Restart', innerW) + '│');
+    lines.push('│' + padCenter('[H] History', innerW) + '│');
+    lines.push('│' + padCenter('[Q] Quit', innerW) + '│');
+    lines.push('└' + border + '┘');
+  }
+
+  const color = isNewRecord ? COLOR.yellow : COLOR.red;
+  const startY = cy - Math.floor(lines.length / 2);
+  for (let i = 0; i < lines.length; i++) {
+    write(moveTo(cx - halfW, startY + i) + color + COLOR.bold + lines[i] + COLOR.reset);
   }
 }
 
@@ -348,10 +458,49 @@ function drawMenu() {
   for (let i = 0; i < title.length; i++) {
     write(moveTo(cx - 10, cy - 4 + i) + COLOR.brightGreen + COLOR.bold + title[i] + COLOR.reset);
   }
-  write(moveTo(cx - 10, cy) + COLOR.cyan + '  Press ENTER to start' + COLOR.reset);
-  write(moveTo(cx - 10, cy + 1) + COLOR.cyan + '  Press Q to quit' + COLOR.reset);
-  write(moveTo(cx - 10, cy + 3) + COLOR.dim + '  WASD/Arrows to move' + COLOR.reset);
-  write(moveTo(cx - 10, cy + 4) + COLOR.dim + '  Ctrl+Z to suspend' + COLOR.reset);
+  const hs = getHighScore();
+  if (hs > 0) {
+    write(moveTo(cx - 10, cy - 1) + COLOR.yellow + COLOR.bold + '  High Score: ' + hs + COLOR.reset);
+  }
+  write(moveTo(cx - 10, cy + 0) + COLOR.cyan + '  Press ENTER to start' + COLOR.reset);
+  write(moveTo(cx - 10, cy + 1) + COLOR.cyan + '  [H] History' + COLOR.reset);
+  write(moveTo(cx - 10, cy + 2) + COLOR.cyan + '  Press Q to quit' + COLOR.reset);
+  write(moveTo(cx - 10, cy + 4) + COLOR.dim + '  WASD/Arrows to move' + COLOR.reset);
+  write(moveTo(cx - 10, cy + 5) + COLOR.dim + '  Ctrl+Z to suspend' + COLOR.reset);
+}
+
+function drawHistory() {
+  write(CLEAR);
+  fitGrid();
+  const cx = offsetX + gridW;
+  const cy = offsetY + 1;
+
+  write(moveTo(cx - 16, cy) + COLOR.yellow + COLOR.bold + '🏆  HIGH SCORES' + COLOR.reset);
+  write(moveTo(cx - 16, cy + 1) + COLOR.dim + '─'.repeat(32) + COLOR.reset);
+
+  const header = COLOR.bold +
+    '#'.padEnd(4) + 'Player'.padEnd(12) + 'Score'.padEnd(8) + 'Date' + COLOR.reset;
+  write(moveTo(cx - 16, cy + 2) + header);
+
+  const records = loadHistory();
+  records.sort((a, b) => b.score - a.score);
+  const top = records.slice(0, 10);
+
+  for (let i = 0; i < top.length; i++) {
+    const r = top[i];
+    const rank = String(i + 1).padEnd(4);
+    const name = (r.username || '???').slice(0, 10).padEnd(12);
+    const sc = String(r.score).padEnd(8);
+    const date = r.time ? r.time.slice(0, 10) : '??';
+    const color = i === 0 ? COLOR.yellow : (i < 3 ? COLOR.cyan : COLOR.white);
+    write(moveTo(cx - 16, cy + 3 + i) + color + rank + name + sc + date + COLOR.reset);
+  }
+
+  if (top.length === 0) {
+    write(moveTo(cx - 16, cy + 3) + COLOR.dim + 'No records yet. Play a game!' + COLOR.reset);
+  }
+
+  write(moveTo(cx - 16, cy + 14) + COLOR.dim + 'Press any key to return' + COLOR.reset);
 }
 
 // ── Focus handling (tmux focus events) ──────────────────────────────
@@ -463,6 +612,9 @@ function handleInput(data) {
       initGame();
       fullDraw();
       startTick();
+    } else if (key === 'h' || key === 'H') {
+      state = 'history';
+      drawHistory();
     } else if (key === 'q' || key === 'Q') {
       cleanup();
       process.exit(0);
@@ -472,12 +624,21 @@ function handleInput(data) {
     return;
   }
 
+  if (state === 'history') {
+    state = 'menu';
+    drawMenu();
+    return;
+  }
+
   if (state === 'gameover') {
     if (key === 'r' || key === 'R') {
       state = 'playing';
       initGame();
       fullDraw();
       startTick();
+    } else if (key === 'h' || key === 'H') {
+      state = 'history';
+      drawHistory();
     } else if (key === 'q' || key === 'Q') {
       cleanup();
       process.exit(0);
@@ -557,6 +718,8 @@ function handleSIGCONT() {
     drawGameOver();
   } else if (state === 'menu') {
     drawMenu();
+  } else if (state === 'history') {
+    drawHistory();
   }
 }
 
@@ -579,6 +742,8 @@ function setup() {
       if (state === 'paused') drawPauseMenu();
     } else if (state === 'menu') {
       drawMenu();
+    } else if (state === 'history') {
+      drawHistory();
     } else if (state === 'gameover') {
       fitGrid();
       clampGameObjects();
@@ -591,6 +756,7 @@ function setup() {
 function cleanup() {
   stopTick();
   cancelCountdown();
+  if (milestoneTimer) { clearTimeout(milestoneTimer); milestoneTimer = null; }
   write(FOCUS_EVENT_OFF + CURSOR_SHOW + ALT_SCREEN_OFF);
   stdin.setRawMode(false);
   stdin.pause();
