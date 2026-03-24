@@ -68,7 +68,9 @@ let offsetY = 1; // top margin in terminal rows
 
 let snake, direction, nextDirection, food, score, gameOver, paused;
 let tickTimer = null;
-let state = 'menu'; // menu | playing | paused | gameover
+let countdownTimer = null;
+let state = 'menu'; // menu | playing | paused | gameover | countdown
+let pausedByFocus = false; // true when auto-paused by losing tmux focus
 
 function fitGrid() {
   const cols = stdout.columns || 80;
@@ -95,6 +97,18 @@ function initGame() {
   gameOver = false;
   paused = false;
   spawnFood();
+}
+
+function clampGameObjects() {
+  // Clamp snake segments to new grid bounds
+  for (const seg of snake) {
+    seg.x = Math.min(seg.x, gridW - 1);
+    seg.y = Math.min(seg.y, gridH - 1);
+  }
+  // Re-spawn food if it's out of bounds
+  if (food && (food.x >= gridW || food.y >= gridH)) {
+    spawnFood();
+  }
 }
 
 function spawnFood() {
@@ -240,6 +254,40 @@ function fullDraw() {
   }
 }
 
+function drawCountdown(n) {
+  const cx = offsetX + gridW;
+  const cy = offsetY + Math.floor(gridH / 2);
+  const label = n > 0 ? `${n}` : 'GO!';
+  const box = [
+    '┌──────────────────────┐',
+    '│     ⏱  RESUMING      │',
+    '│                      │',
+    `│          ${label}${' '.repeat(Math.max(0, 11 - label.length))}│`,
+    '│                      │',
+    '│   Get ready...       │',
+    '└──────────────────────┘',
+  ];
+  for (let i = 0; i < box.length; i++) {
+    write(moveTo(cx - 12, cy - 3 + i) + COLOR.yellow + COLOR.bold + box[i] + COLOR.reset);
+  }
+}
+
+function drawFocusPaused() {
+  const cx = offsetX + gridW;
+  const cy = offsetY + Math.floor(gridH / 2);
+  const box = [
+    '┌──────────────────────┐',
+    '│      ⏸  PAUSED       │',
+    '│                      │',
+    '│  Click this pane to  │',
+    '│  resume the game     │',
+    '└──────────────────────┘',
+  ];
+  for (let i = 0; i < box.length; i++) {
+    write(moveTo(cx - 12, cy - 3 + i) + COLOR.cyan + COLOR.bold + box[i] + COLOR.reset);
+  }
+}
+
 function drawPauseMenu() {
   const cx = offsetX + gridW;
   const cy = offsetY + Math.floor(gridH / 2);
@@ -260,19 +308,30 @@ function drawGameOver() {
   const cx = offsetX + gridW;
   const cy = offsetY + Math.floor(gridH / 2);
   const scoreLine = `Score: ${score}`;
-  const pad = ' '.repeat(Math.max(0, Math.floor((18 - scoreLine.length) / 2)));
+  const innerW = Math.max(20, scoreLine.length + 4);
+  const totalW = innerW + 2; // +2 for │ on each side
+  const halfW = Math.floor(totalW / 2);
+
+  function padCenter(text, width) {
+    const left = Math.floor((width - text.length) / 2);
+    const right = width - text.length - left;
+    return ' '.repeat(left) + text + ' '.repeat(right);
+  }
+
+  const border = '─'.repeat(innerW);
+  const empty = ' '.repeat(innerW);
   const box = [
-    '┌──────────────────────┐',
-    '│     💀 GAME OVER     │',
-    '│                      │',
-    `│  ${pad}${scoreLine}${' '.repeat(Math.max(0, 18 - pad.length - scoreLine.length))}  │`,
-    '│                      │',
-    '│   [R] Restart        │',
-    '│   [Q] Quit           │',
-    '└──────────────────────┘',
+    '┌' + border + '┐',
+    '│' + padCenter('💀 GAME OVER', innerW) + '│',
+    '│' + empty + '│',
+    '│' + padCenter(scoreLine, innerW) + '│',
+    '│' + empty + '│',
+    '│' + padCenter('[R] Restart', innerW) + '│',
+    '│' + padCenter('[Q] Quit', innerW) + '│',
+    '└' + border + '┘',
   ];
   for (let i = 0; i < box.length; i++) {
-    write(moveTo(cx - 12, cy - 4 + i) + COLOR.red + COLOR.bold + box[i] + COLOR.reset);
+    write(moveTo(cx - halfW, cy - 4 + i) + COLOR.red + COLOR.bold + box[i] + COLOR.reset);
   }
 }
 
@@ -295,14 +354,107 @@ function drawMenu() {
   write(moveTo(cx - 10, cy + 4) + COLOR.dim + '  Ctrl+Z to suspend' + COLOR.reset);
 }
 
+// ── Focus handling (tmux focus events) ──────────────────────────────
+const FOCUS_EVENT_ON = '\x1b[?1004h';  // Request focus events from terminal
+const FOCUS_EVENT_OFF = '\x1b[?1004l';
+
+function handleFocusLost() {
+  if (state !== 'playing') return;
+  pausedByFocus = true;
+  paused = true;
+  state = 'paused';
+  stopTick();
+  cancelCountdown();
+  fullDraw();
+  drawFocusPaused();
+}
+
+function handleFocusGained() {
+  if (!pausedByFocus || state !== 'paused') return;
+  pausedByFocus = false;
+  startCountdown();
+}
+
+function startCountdown() {
+  state = 'countdown';
+  let remaining = 3;
+  fullDraw();
+  drawCountdown(remaining);
+
+  function step() {
+    remaining--;
+    if (remaining > 0) {
+      fullDraw();
+      drawCountdown(remaining);
+      countdownTimer = setTimeout(step, 1000);
+    } else {
+      // Show "GO!" briefly then resume
+      fullDraw();
+      drawCountdown(0);
+      countdownTimer = setTimeout(() => {
+        countdownTimer = null;
+        state = 'playing';
+        paused = false;
+        fullDraw();
+        startTick();
+      }, 500);
+    }
+  }
+
+  countdownTimer = setTimeout(step, 1000);
+}
+
+function cancelCountdown() {
+  if (countdownTimer) {
+    clearTimeout(countdownTimer);
+    countdownTimer = null;
+  }
+}
+
 // ── Input handling ──────────────────────────────────────────────────
+let escTimer = null;
+
+function handleEsc() {
+  // Bare Esc confirmed (no following sequence bytes arrived)
+  cleanup();
+  process.exit(0);
+}
+
 function handleInput(data) {
   const key = data.toString();
+
+  // If we were waiting to confirm a bare Esc, cancel — this data is part of an escape sequence
+  if (escTimer !== null) {
+    clearTimeout(escTimer);
+    escTimer = null;
+  }
+
+  // Focus events from tmux: \x1b[I = focus gained, \x1b[O = focus lost
+  if (key === '\x1b[I') {
+    handleFocusGained();
+    return;
+  }
+  if (key === '\x1b[O') {
+    handleFocusLost();
+    return;
+  }
 
   // Ctrl+C → exit
   if (key === '\x03') {
     cleanup();
     process.exit(0);
+  }
+
+  if (state === 'countdown') {
+    // During countdown, only allow quit
+    if (key === 'q' || key === 'Q') {
+      cancelCountdown();
+      cleanup();
+      process.exit(0);
+    } else if (key === '\x1b') {
+      escTimer = setTimeout(() => { cancelCountdown(); handleEsc(); }, 50);
+    }
+    return;
   }
 
   if (state === 'menu') {
@@ -311,9 +463,11 @@ function handleInput(data) {
       initGame();
       fullDraw();
       startTick();
-    } else if (key === 'q' || key === 'Q' || key === '\x1b') {
+    } else if (key === 'q' || key === 'Q') {
       cleanup();
       process.exit(0);
+    } else if (key === '\x1b') {
+      escTimer = setTimeout(handleEsc, 50);
     }
     return;
   }
@@ -324,9 +478,11 @@ function handleInput(data) {
       initGame();
       fullDraw();
       startTick();
-    } else if (key === 'q' || key === 'Q' || key === '\x1b') {
+    } else if (key === 'q' || key === 'Q') {
       cleanup();
       process.exit(0);
+    } else if (key === '\x1b') {
+      escTimer = setTimeout(handleEsc, 50);
     }
     return;
   }
@@ -337,9 +493,11 @@ function handleInput(data) {
       paused = false;
       fullDraw();
       startTick();
-    } else if (key === 'q' || key === 'Q' || key === '\x1b') {
+    } else if (key === 'q' || key === 'Q') {
       cleanup();
       process.exit(0);
+    } else if (key === '\x1b') {
+      escTimer = setTimeout(handleEsc, 50);
     }
     return;
   }
@@ -359,9 +517,11 @@ function handleInput(data) {
     state = 'paused';
     stopTick();
     drawPauseMenu();
-  } else if (key === 'q' || key === 'Q' || key === '\x1b') {
+  } else if (key === 'q' || key === 'Q') {
     cleanup();
     process.exit(0);
+  } else if (key === '\x1b') {
+    escTimer = setTimeout(handleEsc, 50);
   }
 }
 
@@ -407,19 +567,21 @@ function setup() {
   stdin.setEncoding('utf8');
   stdin.on('data', handleInput);
 
-  write(ALT_SCREEN_ON + CURSOR_HIDE);
+  write(ALT_SCREEN_ON + CURSOR_HIDE + FOCUS_EVENT_ON);
 
   process.on('SIGTSTP', handleSIGTSTP);
 
   process.on('SIGWINCH', () => {
     if (state === 'playing' || state === 'paused') {
       fitGrid();
+      clampGameObjects();
       fullDraw();
       if (state === 'paused') drawPauseMenu();
     } else if (state === 'menu') {
       drawMenu();
     } else if (state === 'gameover') {
       fitGrid();
+      clampGameObjects();
       fullDraw();
       drawGameOver();
     }
@@ -428,7 +590,8 @@ function setup() {
 
 function cleanup() {
   stopTick();
-  write(CURSOR_SHOW + ALT_SCREEN_OFF);
+  cancelCountdown();
+  write(FOCUS_EVENT_OFF + CURSOR_SHOW + ALT_SCREEN_OFF);
   stdin.setRawMode(false);
   stdin.pause();
 }

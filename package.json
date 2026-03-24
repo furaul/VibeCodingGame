@@ -1,0 +1,14 @@
+{
+  "name": "vibe-coding-game",
+  "version": "1.0.0",
+  "description": "Terminal snake game to play while waiting for vibe coding responses",
+  "main": "snake.js",
+  "bin": {
+    "snake": "./snake.js"
+  },
+  "scripts": {
+    "start": "node snake.js"
+  },
+  "keywords": ["terminal", "game", "snake", "cli"],
+  "license": "MIT"
+}
