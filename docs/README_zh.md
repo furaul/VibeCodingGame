@@ -6,6 +6,8 @@ Vibe Coding 的时候，等 AI 响应太无聊？来一局贪吃蛇。
 
 这是一个终端贪吃蛇游戏，专为 tmux 分屏 + Claude Code 的工作流设计。在一个 pane 里跑 Claude Code，另一个 pane 里玩蛇，切换 pane 时游戏自动暂停，切回来有 3 秒倒计时让你准备好再继续。
 
+![截图](./screenshot.png)
+
 ## 快速开始
 
 ### 1. 安装 tmux（如果还没有）

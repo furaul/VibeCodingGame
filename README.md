@@ -4,6 +4,8 @@
 
 A terminal snake game designed for the tmux + Claude Code workflow. Play snake in one pane while waiting for AI responses in the other. The game auto-pauses when you switch panes and gives you a 3-second countdown when you come back.
 
+![Screenshot](./docs/screenshot.png)
+
 ## Quick Start
 
 ### 1. Install tmux (if needed)
